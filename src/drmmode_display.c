@@ -631,11 +631,15 @@ drmmode_cursor_init_plane(ScreenPtr pScreen)
 {
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
+	xf86CrtcConfigPtr config = XF86_CRTC_CONFIG_PTR(pScrn);
+	xf86OutputPtr output = config->output[config->compat_output];
 	struct drmmode_rec *drmmode = drmmode_from_scrn(pScrn);
 	struct drmmode_cursor_rec *cursor;
+	drmModeObjectPropertiesPtr props;
+	drmModePropertyPtr prop;
 	drmModePlaneRes *plane_resources;
 	drmModePlane *ovr;
-	int w, h, pad;
+	int w, h, pad, i, j, cursor_plane = 0;
 	uint32_t handles[4], pitches[4], offsets[4]; /* we only use [0] */
 
 	if (drmmode->cursor) {
@@ -660,16 +664,50 @@ drmmode_cursor_init_plane(ScreenPtr pScreen)
 		return FALSE;
 	}
 
-	if (plane_resources->count_planes < 1) {
-		ERROR_MSG("not enough planes for HW cursor");
-		drmModeFreePlaneResources(plane_resources);
-		return FALSE;
+	for (i = 0; i < plane_resources->count_planes; i++) {
+		ovr = drmModeGetPlane(drmmode->fd, plane_resources->planes[i]);
+		if (!ovr) {
+			ERROR_MSG("HW cursor: drmModeGetPlane failed: %s",
+						strerror(errno));
+			drmModeFreePlaneResources(plane_resources);
+			return FALSE;
+		}
+
+		if (!(ovr->possible_crtcs & output->possible_crtcs)) {
+			drmModeFreePlane(ovr);
+			continue;
+		}
+
+		props = drmModeObjectGetProperties(drmmode->fd,
+						   plane_resources->planes[i],
+						   DRM_MODE_OBJECT_PLANE);
+
+		if (!props) {
+			drmModeFreeObjectProperties(props);
+			drmModeFreePlane(ovr);
+			continue;
+		}
+
+		for (j = 0; j < props->count_props; j++) {
+			prop = drmModeGetProperty(drmmode->fd, props->props[j]);
+
+			if (!strcmp(prop->name, "type") &&
+			    (prop->values[j] == DRM_PLANE_TYPE_CURSOR))
+				cursor_plane = i;
+
+			drmModeFreeProperty(prop);
+
+		}
+
+		drmModeFreeObjectProperties(props);
+		drmModeFreePlane(ovr);
+
+		if (cursor_plane)
+			break;
 	}
 
-	ovr = drmModeGetPlane(drmmode->fd, plane_resources->planes[0]);
-	if (!ovr) {
-		ERROR_MSG("HW cursor: drmModeGetPlane failed: %s",
-					strerror(errno));
+	if (!cursor_plane) {
+		ERROR_MSG("not enough planes for HW cursor");
 		drmModeFreePlaneResources(plane_resources);
 		return FALSE;
 	}
